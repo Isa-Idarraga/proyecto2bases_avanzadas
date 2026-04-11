@@ -717,7 +717,7 @@ SELECT client_addr, state, sync_state FROM pg_stat_replication;
 
 ## 4. Carga de datos <a name="datos"></a>
 
-Se reutilizó el script de generación de datos de Isabella (`/scripts/generar_datos.py`) apuntando al Primary en el puerto 5433:
+Se reutilizó el script de generación de datos de (`/scripts/generar_datos.py`) apuntando al Primary en el puerto 5433:
 
 ```python
 conn = psycopg2.connect(
