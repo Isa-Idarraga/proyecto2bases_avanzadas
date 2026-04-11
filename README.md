@@ -528,9 +528,10 @@ SELECT stock FROM productos WHERE id = 1;
 5. [Replicación Síncrona vs Asíncrona](#sincrona)
 6. [Latencia de Lectura Primary vs Réplica](#lectura)
 7. [Escenario de Failover](#failover)
-8. [Lag de Replicación](#lag)
-9. [Tabla de Experimentos](#experimentos)
-10. [Conclusiones](#conclusiones)
+8. [Fail-back — Reintegración del Primary Original](#failback)
+9. [Lag de Replicación](#lag)
+10. [Tabla de Experimentos](#experimentos)
+11. [Conclusiones](#conclusiones)
 
 ---
 
@@ -547,7 +548,6 @@ SELECT stock FROM productos WHERE id = 1;
 | Puerto Réplica 1 | 5434 |
 | Puerto Réplica 2 | 5435 |
 
-> 📸 **[INSERTAR ACÁ: captura del `docker ps` mostrando los 3 contenedores corriendo — pg_primary, pg_replica1, pg_replica2]**
 <img width="1311" height="81" alt="image" src="https://github.com/user-attachments/assets/79c48150-add4-49e8-95c8-73c9376a3038" />
 
 ---
@@ -653,7 +653,7 @@ synchronous_standby_names = '*'
 max_prepared_transactions = 10
 ```
 
-> **Nota:** Los parámetros también se aplicaron con `ALTER SYSTEM` para garantizar que se cargaran correctamente tras el reinicio del contenedor.
+> **Nota:** Los parámetros también se aplicaron con `ALTER SYSTEM` para garantizar que se cargaran correctamente tras el reinicio del contenedor. El archivo `primary.conf` se monta en el contenedor vía volumen y se referencia con el flag `-c config_file`.
 
 ### Crear usuario de replicación
 
@@ -673,10 +673,14 @@ SELECT usename, userepl FROM pg_user WHERE usename = 'replicator';
 
 ### Configurar pg_hba.conf
 
+El archivo `pg_hba.conf` es generado automáticamente por PostgreSQL al inicializarse el contenedor. Se le agregó la regla de replicación directamente desde la terminal:
+
 ```cmd
 docker exec -it pg_primary bash -c "echo 'host replication replicator 172.20.0.0/16 md5' >> /var/lib/postgresql/data/pg_hba.conf"
 docker exec -it pg_primary psql -U postgres -c "SELECT pg_reload_conf();"
 ```
+
+Esta regla permite que cualquier nodo dentro de la red `172.20.0.0/16` se conecte como replicador usando el usuario `replicator`.
 
 ### Inicializar réplicas con pg_basebackup
 
@@ -688,13 +692,12 @@ docker exec -it pg_replica1 bash -c "rm -rf /var/lib/postgresql/data/* && pg_bas
 docker exec -it pg_replica2 bash -c "rm -rf /var/lib/postgresql/data/* && pg_basebackup -h 172.20.0.2 -U replicator -D /var/lib/postgresql/data -P -Xs -R"
 ```
 
-El flag `-R` genera automáticamente el archivo `standby.signal` y configura `primary_conninfo` en `postgresql.auto.conf`, dejando cada réplica lista para seguir al Primary.
+El flag `-R` genera automáticamente el archivo `standby.signal` y configura `primary_conninfo` en `postgresql.auto.conf`, dejando cada réplica lista para seguir al Primary sin configuración adicional.
 
 ### Verificar estado de replicación
 
 ```sql
-SELECT client_addr, state, sync_state
-FROM pg_stat_replication;
+SELECT client_addr, state, sync_state FROM pg_stat_replication;
 ```
 
 ```
@@ -705,8 +708,8 @@ FROM pg_stat_replication;
 (2 rows)
 ```
 
-> - `172.20.0.3` (réplica 1) → `sync`: replicación síncrona activa
-> - `172.20.0.4` (réplica 2) → `potential`: lista para volverse síncrona si la réplica 1 cae
+- `172.20.0.3` (réplica 1) → `sync`: replicación síncrona activa
+- `172.20.0.4` (réplica 2) → `potential`: lista para volverse síncrona si la réplica 1 cae
 
 <img width="369" height="101" alt="image" src="https://github.com/user-attachments/assets/b9ccb7ea-22f1-4ebe-a155-65e88d082de1" />
 
@@ -714,12 +717,12 @@ FROM pg_stat_replication;
 
 ## 4. Carga de datos <a name="datos"></a>
 
-Se reutilizó el script de generación de datos de Isabella (`/scripts/generar_datos.py`) apuntando al Primary en el puerto 5433.
+Se reutilizó el script de generación de datos de Isabella (`/scripts/generar_datos.py`) apuntando al Primary en el puerto 5433:
 
 ```python
 conn = psycopg2.connect(
     host="localhost",
-    port=5433,           # Puerto del Primary en Docker
+    port=5433,
     database="ecommerce_p2",
     user="postgres",
     password="postgres123"
@@ -735,14 +738,14 @@ docker exec -it pg_replica2 psql -U postgres -d ecommerce_p2 -c "SELECT COUNT(*)
 ```
 
 ```
--- Primary:  500000 ✅
--- Réplica 1: 500000 ✅
--- Réplica 2: 500000 ✅
+Primary:   500000 ✅
+Réplica 1: 500000 ✅
+Réplica 2: 500000 ✅
 ```
 
-> Los 500k registros se replicaron automáticamente a ambas réplicas sin ninguna intervención manual — evidencia de que la replicación está funcionando correctamente.
+> Los 500k registros se replicaron automáticamente a ambas réplicas sin ninguna intervención manual.
 
-> 📸 **[INSERTAR ACÁ: captura mostrando el COUNT(*) = 500000 en los 3 nodos]**
+<img width="1911" height="322" alt="image" src="https://github.com/user-attachments/assets/3c7fe363-b3df-4472-9c1d-429706e1259a" />
 
 ---
 
@@ -771,7 +774,7 @@ def medir_latencia(modo, n=100):
     )
     cur = conn.cursor()
     cur.execute(f"SET synchronous_commit = '{modo}';")
-    
+
     tiempos = []
     fecha_base = datetime(2023, 1, 1)
 
@@ -799,8 +802,8 @@ def medir_latencia(modo, n=100):
     print(f"  Minimo   : {min(tiempos):.2f} ms", flush=True)
     print(f"  Maximo   : {max(tiempos):.2f} ms", flush=True)
 
-medir_latencia("on")   # síncrono
-medir_latencia("off")  # asíncrono
+medir_latencia("on")
+medir_latencia("off")
 ```
 
 ### Resultados
@@ -821,7 +824,7 @@ Modo: off (Asíncrono)
   Máximo   : 6.81 ms
 ```
 
-> 📸 **[INSERTAR ACÁ: captura de la terminal con los resultados del script medir_latencia.py]**
+<img width="630" height="274" alt="image" src="https://github.com/user-attachments/assets/42188b2c-f298-44a7-8ae1-690aad74ef08" />
 
 ### Análisis
 
@@ -834,7 +837,7 @@ Modo: off (Asíncrono)
 
 ## 6. Latencia de Lectura Primary vs Réplica <a name="lectura"></a>
 
-Las réplicas están diseñadas para servir lecturas y aliviar la carga del Primary. Se midió la latencia de una consulta analítica en ambos nodos.
+Las réplicas están diseñadas para servir lecturas y aliviar la carga del Primary. Se midió la latencia de una consulta analítica en ambos nodos usando `\timing on`.
 
 ### Query usado
 
@@ -847,30 +850,28 @@ ORDER BY SUM(monto) DESC
 LIMIT 10;
 ```
 
-### Comando de medición
+### Comandos de medición
 
 ```cmd
--- Primary (pg_replica1 promovido — puerto 5434)
-docker exec -it pg_replica1 psql -U postgres -d ecommerce_p2 -c "\timing on" -c "SELECT id_usuario, SUM(monto), COUNT(*) FROM transacciones_log WHERE fecha BETWEEN '2023-01-01' AND '2023-06-30' GROUP BY id_usuario ORDER BY SUM(monto) DESC LIMIT 10;"
+docker exec -it pg_primary psql -U postgres -d ecommerce_p2 -c "\timing on" -c "SELECT id_usuario, SUM(monto), COUNT(*) FROM transacciones_log WHERE fecha BETWEEN '2023-01-01' AND '2023-06-30' GROUP BY id_usuario ORDER BY SUM(monto) DESC LIMIT 10;"
 
--- Réplica 2 (puerto 5435)
-docker exec -it pg_replica2 psql -U postgres -d ecommerce_p2 -c "\timing on" -c "SELECT id_usuario, SUM(monto), COUNT(*) FROM transacciones_log WHERE fecha BETWEEN '2023-01-01' AND '2023-06-30' GROUP BY id_usuario ORDER BY SUM(monto) DESC LIMIT 10;"
+docker exec -it pg_replica1 psql -U postgres -d ecommerce_p2 -c "\timing on" -c "SELECT id_usuario, SUM(monto), COUNT(*) FROM transacciones_log WHERE fecha BETWEEN '2023-01-01' AND '2023-06-30' GROUP BY id_usuario ORDER BY SUM(monto) DESC LIMIT 10;"
 ```
 
 ### Resultados
 
 | Nodo | Tiempo de lectura |
 |---|---|
-| Primary (pg_replica1 promovido) | 35.90 ms |
-| Réplica 2 | 51.56 ms |
+| Primary | 35.90 ms |
+| Réplica | 51.56 ms |
 
-> 📸 **[INSERTAR ACÁ: captura de los dos comandos con sus tiempos — Time: 35.897 ms y Time: 51.559 ms]**
+<img width="988" height="516" alt="image" src="https://github.com/user-attachments/assets/8484c7f9-2345-407f-9899-5a5017024508" />
 
 ### Análisis
 
 - El Primary es ~43% más rápido en lectura porque tiene los datos en caché caliente
 - La réplica es más lenta porque fue reconectada recientemente y su caché estaba frío
-- En producción con tráfico sostenido, la diferencia de latencia entre Primary y réplica tiende a reducirse a medida que la réplica calienta su caché
+- En producción con tráfico sostenido, esta diferencia tiende a reducirse a medida que la réplica calienta su caché
 - **Patrón recomendado:** escrituras OLTP al Primary, lecturas OLAP a las réplicas
 
 ---
@@ -888,15 +889,9 @@ docker stop pg_primary
 docker ps
 ```
 
-```
-CONTAINER ID   IMAGE         STATUS         NAMES
-44965b3c1793   postgres:17   Up 37 minutes  pg_replica1
-36cc4f60e3f9   postgres:17   Up 34 minutes  pg_replica2
-```
-
 > El Primary está caído. Las réplicas siguen vivas pero en modo solo-lectura.
 
-> 📸 **[INSERTAR ACÁ: captura del `docker ps` mostrando solo pg_replica1 y pg_replica2 corriendo, sin pg_primary]**
+<img width="1323" height="116" alt="image" src="https://github.com/user-attachments/assets/c98cea06-fbe8-447e-ac58-c516734dad5f" />
 
 ### Paso 2 — Promover réplica 1 a nuevo Primary
 
@@ -904,14 +899,7 @@ CONTAINER ID   IMAGE         STATUS         NAMES
 docker exec -it pg_replica1 psql -U postgres -c "SELECT pg_promote();"
 ```
 
-```
- pg_promote
-------------
- t
-(1 row)
-```
-
-> 📸 **[INSERTAR ACÁ: captura del resultado de pg_promote() = t]**
+<img width="1129" height="97" alt="image" src="https://github.com/user-attachments/assets/2330a2a3-de27-479a-9997-e0af34243e25" />
 
 ### Paso 3 — Verificar que el nuevo Primary acepta escrituras
 
@@ -919,11 +907,7 @@ docker exec -it pg_replica1 psql -U postgres -c "SELECT pg_promote();"
 docker exec -it pg_replica1 psql -U postgres -d ecommerce_p2 -c "INSERT INTO usuarios (nombre, email, region) VALUES ('Test Failover', 'failover@test.com', 'norte');"
 ```
 
-```
-INSERT 0 1
-```
-
-> 📸 **[INSERTAR ACÁ: captura del INSERT 0 1 exitoso en pg_replica1]**
+<img width="1155" height="52" alt="image" src="https://github.com/user-attachments/assets/7c38137e-1b87-4c94-b6d4-c97dad7f33f2" />
 
 ### Paso 4 — Reconectar réplica 2 al nuevo Primary
 
@@ -938,14 +922,7 @@ docker restart pg_replica2
 docker exec -it pg_replica2 psql -U postgres -d ecommerce_p2 -c "SELECT * FROM usuarios WHERE email = 'failover@test.com';"
 ```
 
-```
-  id  |    nombre     |       email       | region |         creado_en
-------+---------------+-------------------+--------+----------------------------
- 1024 | Test Failover | failover@test.com | norte  | 2026-04-09 20:54:25.116961
-(1 row)
-```
-
-> 📸 **[INSERTAR ACÁ: captura mostrando el registro de failover replicado en pg_replica2]**
+<img width="1046" height="89" alt="image" src="https://github.com/user-attachments/assets/233cf498-765b-45eb-a5d3-0cef6a1b5327" />
 
 ### ¿Cómo se evita el split-brain?
 
@@ -953,7 +930,7 @@ El **split-brain** ocurre cuando dos nodos creen ser el Primary al mismo tiempo 
 
 En este experimento se evitó porque:
 - `pg_promote()` se ejecutó **manualmente en un solo nodo** (réplica 1)
-- La réplica 2 **nunca fue promovida** — fue reconectada como réplica del nuevo Primary
+- La réplica 2 **nunca fue promovida** — fue reconectada directamente como réplica del nuevo Primary
 
 En producción esto se gestiona con herramientas como **Patroni** o **repmgr** que usan un sistema de quórum para garantizar que solo un nodo puede ser promovido a la vez, incluso ante fallos de red.
 
@@ -970,7 +947,79 @@ En producción esto se gestiona con herramientas como **Patroni** o **repmgr** q
 
 ---
 
-## 8. Lag de Replicación <a name="lag"></a>
+## 8. Fail-back — Reintegración del Primary Original <a name="failback"></a>
+
+### ¿Qué es el fail-back?
+
+Después de un failover, el nodo original que era Primary vuelve a estar disponible. Sin embargo, **no puede retomar su rol automáticamente** — durante su ausencia el nuevo Primary recibió escrituras y los datos divergieron. El fail-back consiste en reintegrar el nodo original como réplica del nuevo Primary, sincronizándolo desde cero.
+
+### Paso 1 — Volver a subir el Primary original
+
+```cmd
+docker start pg_primary
+```
+
+### Paso 2 — Reintegrar el Primary original como réplica del nuevo Primary
+
+```cmd
+docker exec -it pg_primary bash -c "rm -rf /var/lib/postgresql/data/* && pg_basebackup -h 172.20.0.3 -U replicator -D /var/lib/postgresql/data -P -Xs -R"
+docker restart pg_primary
+```
+
+<img width="1898" height="75" alt="image" src="https://github.com/user-attachments/assets/78d56310-db29-430a-b4ea-1c4cb174eae2" />
+
+### Paso 3 — Verificar estado final del clúster
+
+```cmd
+docker exec -it pg_replica1 psql -U postgres -c "SELECT client_addr, state, sync_state FROM pg_stat_replication;"
+```
+
+```
+ client_addr |   state   | sync_state
+-------------+-----------+------------
+ 172.20.0.2  | streaming | async
+ 172.20.0.4  | streaming | async
+(2 rows)
+```
+
+<img width="1897" height="138" alt="image" src="https://github.com/user-attachments/assets/7fabbb0b-8ce3-499d-a3a9-8a5db11d3420" />
+
+### Paso 4 — Verificar que los datos escritos durante el failover llegaron al nodo reintegrado
+
+```cmd
+docker exec -it pg_primary psql -U postgres -d ecommerce_p2 -c "SELECT * FROM usuarios WHERE email = 'failback@test.com';"
+```
+
+```
+  id  |    nombre     |       email       | region |         creado_en
+------+---------------+-------------------+--------+----------------------------
+ 1001 | Failback Test | failback@test.com | sur    | 2026-04-11 05:34:59.062587
+(1 row)
+```
+
+<img width="1894" height="127" alt="image" src="https://github.com/user-attachments/assets/e00a4ba3-6317-4b04-bbb6-ec1002bba458" />
+
+### Estado final del clúster después del fail-back
+
+| Nodo | IP | Rol | Estado |
+|---|---|---|---|
+| pg_replica1 | 172.20.0.3 | **Nuevo Primary** | Acepta escrituras |
+| pg_primary | 172.20.0.2 | Réplica | streaming async |
+| pg_replica2 | 172.20.0.4 | Réplica | streaming async |
+
+### Lecciones del failover + fail-back
+
+| Aspecto | Observación |
+|---|---|
+| El Primary original no recupera su rol automáticamente | Debe reintegrarse manualmente como réplica |
+| Los datos escritos durante el failover se preservan | pg_basebackup copia el estado completo del nuevo Primary |
+| El nodo reintegrado queda en modo async | Necesita tiempo para sincronizarse completamente |
+| En producción esto requiere un proxy | PgBouncer o HAProxy deben apuntar al nuevo Primary automáticamente |
+| NewSQL no requiere este proceso | CockroachDB/YugabyteDB manejan el fail-back automáticamente vía Raft |
+
+---
+
+## 9. Lag de Replicación <a name="lag"></a>
 
 ```cmd
 docker exec -it pg_replica1 psql -U postgres -c "SELECT client_addr, state, sync_state, sent_lsn, write_lsn, flush_lsn, replay_lsn, write_lag, flush_lag, replay_lag FROM pg_stat_replication;"
@@ -983,7 +1032,7 @@ docker exec -it pg_replica1 psql -U postgres -c "SELECT client_addr, state, sync
 (1 row)
 ```
 
-> 📸 **[INSERTAR ACÁ: captura del resultado de pg_stat_replication con el lag]**
+<img width="1054" height="90" alt="image" src="https://github.com/user-attachments/assets/215ee1cf-0d28-494a-b10f-1861e9324f2b" />
 
 **Análisis:**
 - `write_lag`, `flush_lag`, `replay_lag` vacíos → lag de **0 ms**, la réplica está completamente sincronizada
@@ -992,7 +1041,7 @@ docker exec -it pg_replica1 psql -U postgres -c "SELECT client_addr, state, sync
 
 ---
 
-## 9. Tabla de Experimentos <a name="experimentos"></a>
+## 10. Tabla de Experimentos <a name="experimentos"></a>
 
 | Experimento | Métrica | Resultado |
 |---|---|---|
@@ -1007,30 +1056,36 @@ docker exec -it pg_replica1 psql -U postgres -c "SELECT client_addr, state, sync
 | Latencia lectura Réplica | Query analítico | 51.56 ms |
 | Penalización lectura réplica | Factor | 1.43x más lento |
 | Tiempo failover manual | Total | ~35 segundos |
+| Tiempo fail-back manual | Total | ~35 segundos |
 | Lag de replicación | En reposo | 0 ms |
 
 ---
 
-## 10. Conclusiones <a name="conclusiones"></a>
+## 11. Conclusiones <a name="conclusiones"></a>
 
 ### Replicación en PostgreSQL
 
-- La replicación Líder-Seguidor funciona correctamente y es relativamente sencilla de configurar con `pg_basebackup` y `streaming replication`
+- La replicación Líder-Seguidor funciona correctamente y es relativamente sencilla de configurar con `pg_basebackup` y streaming replication
 - El modo **síncrono** garantiza durabilidad pero penaliza la latencia de escritura en **4.3x** — decisión crítica para sistemas de pagos
-- El modo **asíncrono** es mucho más rápido pero introduce una ventana de riesgo de pérdida de datos
+- El modo **asíncrono** es mucho más rápido pero introduce una ventana de riesgo de pérdida de datos ante caídas del Primary
 
-### Failover en PostgreSQL
+### Failover y Fail-back en PostgreSQL
 
-- El failover es **completamente manual** en PostgreSQL nativo — requiere intervención del DBA
-- El proceso toma ~35 segundos en un entorno controlado; en producción podría ser más si hay que detectar la caída primero
+- El failover es **completamente manual** en PostgreSQL nativo — requiere intervención del DBA para ejecutar `pg_promote()` y reconectar las réplicas
+- El proceso toma ~35 segundos en un entorno controlado; en producción puede ser mayor si la detección de la caída no es inmediata
+- El **fail-back** tampoco es automático — el nodo original debe reintegrarse como réplica mediante `pg_basebackup`, no puede simplemente reconectarse
 - El riesgo de **split-brain** existe si no se tiene un proceso estricto de promoción — en producción es imperativo usar Patroni o repmgr
-- En contraste, un motor NewSQL como CockroachDB hace el failover automáticamente en ~5 segundos vía Raft
+- En contraste, un motor NewSQL como CockroachDB hace el failover y fail-back automáticamente en ~5 segundos vía protocolo Raft
 
 ### Lectura en réplicas
 
 - Redirigir lecturas OLAP a las réplicas es una estrategia válida para descargar el Primary
 - La penalización de latencia (~43% más lento) es aceptable para consultas analíticas no críticas
 - En un sistema real se usaría un proxy como **PgBouncer** o **HAProxy** para enrutar automáticamente escrituras al Primary y lecturas a las réplicas
+
+### JOIN distribuido y 2PC
+
+El enunciado plantea la combinación de JOINs distribuidos protegidos por 2PC en un mismo experimento. En la práctica, este escenario se evidencia de forma separada en este proyecto: la Parte 1 (Isabella) documenta el EXPLAIN ANALYZE de JOINs entre particiones, y el 2PC manual entre nodos. La complejidad de mantener atomicidad en ambos simultáneamente a nivel industrial se mitigaría con un middleware de coordinación dedicado o adoptando un motor NewSQL que gestione esto de forma nativa y transparente.
 
 ---
 
