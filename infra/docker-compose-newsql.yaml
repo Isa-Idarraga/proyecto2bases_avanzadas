@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+
+  crdb-node1:
+    image: cockroachdb/cockroach:v23.2.0
+    container_name: crdb_node1
+    command: start
+      --insecure
+      --store=node1
+      --listen-addr=crdb-node1:26257
+      --http-addr=crdb-node1:8080
+      --join=crdb-node1,crdb-node2,crdb-node3
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+    volumes:
+      - crdb_node1_data:/cockroach/cockroach-data
+    networks:
+      crdb_net:
+        ipv4_address: 172.21.0.2
+
+  crdb-node2:
+    image: cockroachdb/cockroach:v23.2.0
+    container_name: crdb_node2
+    command: start
+      --insecure
+      --store=node2
+      --listen-addr=crdb-node2:26257
+      --http-addr=crdb-node2:8080
+      --join=crdb-node1,crdb-node2,crdb-node3
+    ports:
+      - "26258:26257"
+      - "8081:8080"
+    volumes:
+      - crdb_node2_data:/cockroach/cockroach-data
+    networks:
+      crdb_net:
+        ipv4_address: 172.21.0.3
+    depends_on:
+      - crdb-node1
+
+  crdb-node3:
+    image: cockroachdb/cockroach:v23.2.0
+    container_name: crdb_node3
+    command: start
+      --insecure
+      --store=node3
+      --listen-addr=crdb-node3:26257
+      --http-addr=crdb-node3:8080
+      --join=crdb-node1,crdb-node2,crdb-node3
+    ports:
+      - "26259:26257"
+      - "8082:8080"
+    volumes:
+      - crdb_node3_data:/cockroach/cockroach-data
+    networks:
+      crdb_net:
+        ipv4_address: 172.21.0.4
+    depends_on:
+      - crdb-node1
+
+volumes:
+  crdb_node1_data:
+  crdb_node2_data:
+  crdb_node3_data:
+
+networks:
+  crdb_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
