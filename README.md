@@ -1,6 +1,6 @@
 **SI3009 Bases de Datos Avanzadas, 2026-1**  
 **Ingeniería de Sistemas**  
-**Equipo:** Isabella · Juan José · Nicolás
+**Equipo:** Isabella Idarraga · Juan José Rodriguez · Nicolás Saldarriaga
 
 ---
 
@@ -10,15 +10,15 @@
 2. [Modelo de Datos](#modelo)
 3. [Volúmenes Estimados](#volumenes)
 4. [Operaciones OLTP y OLAP](#operaciones)
-5. [Parte 1 — Isabella: PostgreSQL Particionamiento y 2PC](#parte1)
+5. [Parte 1: PostgreSQL Particionamiento y 2PC](#parte1)
    - [Ambiente de trabajo](#ambiente)
    - [Particionamiento por Rango](#rango)
    - [Particionamiento por Hash](#hash)
    - [EXPLAIN ANALYZE](#explain)
    - [Transacciones Distribuidas 2PC](#2pc)
    - [Escenario de fallo del coordinador](#fallo)
-6. [Parte 2 — Juan José: PostgreSQL Replicación, Failover y Experimentos](#parte2)
-7. [Parte 3 — Nicolás: NewSQL y Análisis Comparativo](#parte3)
+6. [Parte 2: PostgreSQL Replicación, Failover y Experimentos](#parte2)
+7. [Parte 3: NewSQL y Análisis Comparativo](#parte3)
 8. [Comparación Final PostgreSQL vs NewSQL](#comparacion)
 9. [Análisis Crítico](#critico)
 10. [Conclusiones](#conclusiones)
@@ -162,7 +162,7 @@ Los datos sintéticos cubren un período de 2 años (2023–2024) con distribuci
 
 ---
 
-## 5. Parte 1 — Isabella: PostgreSQL Particionamiento y 2PC <a name="parte1"></a>
+## 5. Parte 1: PostgreSQL Particionamiento y 2PC <a name="parte1"></a>
 
 ### Ambiente de trabajo <a name="ambiente"></a>
 
@@ -518,7 +518,7 @@ SELECT stock FROM productos WHERE id = 1;
 
 ---
 
-## 6. Parte 2 — Juan José: PostgreSQL Replicación, Failover y Experimentos <a name="parte2"></a>
+## 6. Parte 2: PostgreSQL Replicación, Failover y Experimentos <a name="parte2"></a>
 
 ## Contenido
 1. [Ambiente de trabajo](#ambiente)
@@ -1085,11 +1085,11 @@ docker exec -it pg_replica1 psql -U postgres -c "SELECT client_addr, state, sync
 
 ### JOIN distribuido y 2PC
 
-El enunciado plantea la combinación de JOINs distribuidos protegidos por 2PC en un mismo experimento. En la práctica, este escenario se evidencia de forma separada en este proyecto: la Parte 1 (Isabella) documenta el EXPLAIN ANALYZE de JOINs entre particiones, y el 2PC manual entre nodos. La complejidad de mantener atomicidad en ambos simultáneamente a nivel industrial se mitigaría con un middleware de coordinación dedicado o adoptando un motor NewSQL que gestione esto de forma nativa y transparente.
+El enunciado plantea la combinación de JOINs distribuidos protegidos por 2PC en un mismo experimento. En la práctica, este escenario se evidencia de forma separada en este proyecto: la Parte 1 documenta el EXPLAIN ANALYZE de JOINs entre particiones, y el 2PC manual entre nodos. La complejidad de mantener atomicidad en ambos simultáneamente a nivel industrial se mitigaría con un middleware de coordinación dedicado o adoptando un motor NewSQL que gestione esto de forma nativa y transparente.
 
 ---
 
-## 7. Parte 3 — Nicolás: NewSQL y Análisis Comparativo <a name="parte3"></a>
+## 7. Parte 3: NewSQL y Análisis Comparativo <a name="parte3"></a>
 
 ### Motor seleccionado
 
@@ -1125,7 +1125,7 @@ El enunciado plantea la combinación de JOINs distribuidos protegidos por 2PC en
 
 **Comparación de esfuerzo:**
 
-| Aspecto | PostgreSQL (Isabella) | NewSQL (Nicolás) |
+| Aspecto | PostgreSQL | NewSQL |
 |---|---|---|
 | Configuración de particiones | Manual — 15+ líneas de SQL | Automático |
 | Enrutamiento | Responsabilidad de la app | Transparente |
@@ -1136,7 +1136,7 @@ El enunciado plantea la combinación de JOINs distribuidos protegidos por 2PC en
 > **[INSERTAR ACÁ: explicación del protocolo Raft, identificación del leaseholder y resultado del failover automático]**
 
 **Tiempo de failover automático:** ___ segundos  
-**Tiempo de failover manual PostgreSQL (Juan José):** ___ segundos
+**Tiempo de failover manual PostgreSQL:** ___ segundos
 
 > 📸 **[INSERTAR ACÁ: captura mostrando la elección automática de nuevo líder en el dashboard]**
 
@@ -1170,7 +1170,7 @@ COMMIT;
 # Herramienta usada: pumba / iptables
 ```
 
-**Resultado observado:** _(Nicolás completa acá — ¿el sistema prefirió consistencia o disponibilidad?)_
+**Resultado observado:** _( completa acá — ¿el sistema prefirió consistencia o disponibilidad?)_
 
 ---
 
@@ -1244,11 +1244,11 @@ _(¿Qué tan conscientes son los desarrolladores de estos trade-offs en proyecto
 
 ### Replicación en PostgreSQL
 
-> _(Juan José completa acá con las conclusiones de sus experimentos)_
+> _( completa acá con las conclusiones de sus experimentos)_
 
 ### NewSQL vs PostgreSQL
 
-> _(Nicolás completa acá con las conclusiones del análisis comparativo)_
+> _( completa acá con las conclusiones del análisis comparativo)_
 
 ### Reflexión final del equipo
 
@@ -1262,11 +1262,11 @@ _(¿Qué tan conscientes son los desarrolladores de estos trade-offs en proyecto
 /
 ├── README.md
 ├── /infra
-│   ├── docker-compose.yaml          ← 3 nodos PostgreSQL (Juan José)
-│   └── docker-compose-newsql.yaml   ← Clúster NewSQL (Nicolás)
+│   ├── docker-compose.yaml          ← 3 nodos PostgreSQL 
+│   └── docker-compose-newsql.yaml   ← Clúster NewSQL 
 └── /scripts
-    ├── modelo.sql                   ← Creación de tablas (Isabella)
-    ├── generar_datos.py             ← Datos sintéticos (Isabella)
-    ├── particionamiento.sql         ← Particiones rango y hash (Isabella)
-    └── 2pc.sql                      ← Transacciones distribuidas (Isabella)
+    ├── modelo.sql                   ← Creación de tablas
+    ├── generar_datos.py             ← Datos sintéticos 
+    ├── particionamiento.sql         ← Particiones rango y hash 
+    └── 2pc.sql                      ← Transacciones distribuidas 
 ```
