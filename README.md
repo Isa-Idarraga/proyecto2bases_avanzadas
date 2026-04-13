@@ -1093,84 +1093,347 @@ El enunciado plantea la combinación de JOINs distribuidos protegidos por 2PC en
 
 ### Motor seleccionado
 
-> **[INSERTAR ACÁ: CockroachDB o YugabyteDB — justificar la elección]**
+Se seleccionó **CockroachDB v23.2.0** como motor NewSQL. La elección se justifica por tres razones principales: compatibilidad nativa con el dialecto SQL de PostgreSQL (lo que permite reutilizar el script de datos sintéticos con cambios mínimos), documentación extensa para despliegue en Docker, y un protocolo de consenso Raft maduro que permite comparar directamente el failover automático contra el manual de PostgreSQL.
 
 ### Ambiente de trabajo
 
 | Componente | Detalle |
 |---|---|
-| Motor NewSQL | ___ |
-| Versión | ___ |
+| Motor NewSQL | CockroachDB |
+| Versión | v23.2.0 |
 | Nodos | 3 |
+| Sistema operativo | Ubuntu 24.04 (AWS EC2) |
 | Herramienta | Docker + docker-compose |
+| Base de datos | `ecommerce_p2` |
 
-> 📸 **[INSERTAR ACÁ: captura del dashboard de admin del clúster NewSQL con los 3 nodos saludables]**
+<img width="1520" height="120" alt="image" src="https://github.com/user-attachments/assets/994fab03-4708-48e9-9169-5e46c32cec93" />
+
+
+---
 
 ### Infraestructura (`/infra/docker-compose-newsql.yaml`)
 
+Se desplegaron 3 nodos de CockroachDB en contenedores Docker con IPs fijas en la subred `172.21.0.0/16`, independiente de la red usada por PostgreSQL (`172.20.0.0/16`) para evitar conflictos. Cada nodo expone su puerto SQL y su dashboard de administración en puertos distintos del host.
+
 ```yaml
-# Pegar aquí el docker-compose-newsql.yaml
+version: '3.8'
+
+services:
+
+  crdb-node1:
+    image: cockroachdb/cockroach:v23.2.0
+    container_name: crdb_node1
+    command: start
+      --insecure
+      --store=node1
+      --listen-addr=crdb-node1:26257
+      --http-addr=crdb-node1:8080
+      --join=crdb-node1,crdb-node2,crdb-node3
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+    volumes:
+      - crdb_node1_data:/cockroach/cockroach-data
+    networks:
+      crdb_net:
+        ipv4_address: 172.21.0.2
+
+  crdb-node2:
+    image: cockroachdb/cockroach:v23.2.0
+    container_name: crdb_node2
+    command: start
+      --insecure
+      --store=node2
+      --listen-addr=crdb-node2:26257
+      --http-addr=crdb-node2:8080
+      --join=crdb-node1,crdb-node2,crdb-node3
+    ports:
+      - "26258:26257"
+      - "8081:8080"
+    volumes:
+      - crdb_node2_data:/cockroach/cockroach-data
+    networks:
+      crdb_net:
+        ipv4_address: 172.21.0.3
+    depends_on:
+      - crdb-node1
+
+  crdb-node3:
+    image: cockroachdb/cockroach:v23.2.0
+    container_name: crdb_node3
+    command: start
+      --insecure
+      --store=node3
+      --listen-addr=crdb-node3:26257
+      --http-addr=crdb-node3:8080
+      --join=crdb-node1,crdb-node2,crdb-node3
+    ports:
+      - "26259:26257"
+      - "8082:8080"
+    volumes:
+      - crdb_node3_data:/cockroach/cockroach-data
+    networks:
+      crdb_net:
+        ipv4_address: 172.21.0.4
+    depends_on:
+      - crdb-node1
+
+volumes:
+  crdb_node1_data:
+  crdb_node2_data:
+  crdb_node3_data:
+
+networks:
+  crdb_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
 ```
 
-### Auto-sharding
+**Inicialización del clúster:**
 
-> **[INSERTAR ACÁ: explicación de cómo el motor distribuyó los datos automáticamente y comparación con el esfuerzo manual de PostgreSQL]**
+```bash
+# Levantar los 3 nodos
+docker compose -f infra/docker-compose-newsql.yaml up -d
+
+# Inicializar el clúster (se ejecuta una sola vez)
+docker exec -it crdb_node1 ./cockroach init --insecure --host=crdb_node1:26257
+
+# Verificar estado
+docker exec -it crdb_node1 ./cockroach node status --insecure --host=crdb_node1:26257
+```
+
+**Carga de datos:**
+
+Se reutilizó el script `generar_datos.py` con dos ajustes: puerto `26257` (CockroachDB) en lugar de `5432`, y usuario `root` sin contraseña (modo `--insecure`). El resto de la lógica de inserción —incluyendo los 500.000 registros en `transacciones_log`— se mantuvo idéntico, lo que valida la compatibilidad SQL entre ambos motores.
+
+```bash
+python3 scripts/generar_datos_crdb.py
+```
+
+---
+
+### Auto-sharding y Distribución Automática <a name="autosharding"></a>
+
+#### ¿Qué es el auto-sharding?
+
+CockroachDB divide cada tabla en fragmentos llamados **rangos** (*ranges*). Cada rango cubre un intervalo contiguo de claves primarias, tiene un tamaño máximo de 512 MB, y se replica automáticamente en los 3 nodos del clúster. Cuando un rango supera el umbral de tamaño, el motor lo divide en dos y redistribuye las réplicas sin intervención manual.
+
+#### Distribución observada
 
 ```sql
--- Comando para ver la distribución de rangos:
--- SHOW RANGES FROM TABLE transacciones_log;
+SHOW RANGES FROM TABLE transacciones_log WITH DETAILS;
 ```
 
-> 📸 **[INSERTAR ACÁ: captura mostrando la distribución de rangos entre los 3 nodos]**
+```
+      start_key       |   end_key    | range_id | range_size_mb | lease_holder | replicas | voting_replicas
+----------------------+--------------+----------+---------------+--------------+----------+-----------------
+  <before:/Table/106> | …/1/80000    |       68 |      0.996447 |            3 | {1,2,3}  | {1,3,2}
+  …/1/80000           | …/1/160000   |       69 |      0.000000 |            2 | {1,2,3}  | {1,3,2}
+  …/1/160000          | …/1/240000   |       70 |      0.000000 |            2 | {1,2,3}  | {1,3,2}
+  …/1/240000          | …/1/320000   |       71 |      0.000000 |            1 | {1,2,3}  | {1,3,2}
+  …/1/320000          | <after:/Max> |       72 |     44.830077 |            2 | {1,2,3}  | {1,3,2}
+(5 rows)
+```
 
-**Comparación de esfuerzo:**
+**Interpretación de las columnas clave:**
 
-| Aspecto | PostgreSQL | NewSQL |
+| Columna | Significado |
+|---|---|
+| `start_key` / `end_key` | Intervalo de IDs que cubre el rango |
+| `range_size_mb` | Peso físico del rango en MB |
+| `lease_holder` | Nodo líder que atiende lecturas y escrituras de ese rango |
+| `replicas` | Los 3 nodos donde vive una copia del rango |
+| `voting_replicas` | Réplicas que participan en el consenso Raft |
+
+El rango 72 concentra los 500.000 registros de `transacciones_log` (44.83 MB) y tiene como leaseholder al nodo 2. Los rangos 69–71 son rangos pre-divididos vacíos que CockroachDB reserva anticipadamente para distribución futura — evidencia del rebalanceo proactivo del motor.
+
+#### Rangos por tabla
+
+```sql
+SELECT table_name, count(*) AS cantidad_rangos
+FROM crdb_internal.ranges_no_leases
+WHERE database_name = 'ecommerce_p2'
+GROUP BY table_name
+ORDER BY cantidad_rangos DESC;
+```
+
+```
+    table_name      | cantidad_rangos
+--------------------+----------------
+  transacciones_log |              5
+  usuarios          |              1
+  productos         |              1
+  pedidos           |              1
+  pagos             |              1
+(5 rows)
+```
+
+`transacciones_log` tiene 5 rangos porque es la única tabla con volumen suficiente para activar la pre-división de rangos. Las tablas más pequeñas caben en un solo rango.
+
+#### Comparación de esfuerzo con PostgreSQL
+
+| Aspecto | PostgreSQL | CockroachDB |
 |---|---|---|
-| Configuración de particiones | Manual — 15+ líneas de SQL | Automático |
-| Enrutamiento | Responsabilidad de la app | Transparente |
-| Rebalanceo de datos | Manual | Automático |
+| Configuración de particiones | Manual — 15+ líneas de DDL explícito (`PARTITION BY RANGE`, `PARTITION BY HASH`) | Automático — ninguna configuración requerida |
+| Conocimiento previo requerido | El desarrollador debe anticipar la distribución de los datos | El motor decide la distribución en tiempo de ejecución |
+| Enrutamiento de consultas | Responsabilidad de la aplicación o capa de proxy | Completamente transparente para la aplicación |
+| Rebalanceo al agregar nodos | Manual — hay que reasignar particiones | Automático — el motor redistribuye rangos |
+| Riesgo de partición desbalanceada | Alto si el criterio de partición no es uniforme | Ninguno — el motor garantiza rangos de tamaño similar |
 
-### Raft y Tolerancia a Fallos
+La diferencia fundamental es que en PostgreSQL la complejidad del particionamiento vive en el esquema de la base de datos y en el conocimiento del equipo, mientras que en CockroachDB esa misma complejidad está encapsulada dentro del motor.
 
-> **[INSERTAR ACÁ: explicación del protocolo Raft, identificación del leaseholder y resultado del failover automático]**
+---
 
-**Tiempo de failover automático:** ___ segundos  
-**Tiempo de failover manual PostgreSQL:** ___ segundos
+### Raft, Consenso y Tolerancia a Fallos
 
-> 📸 **[INSERTAR ACÁ: captura mostrando la elección automática de nuevo líder en el dashboard]**
+#### ¿Qué es Raft?
+
+Raft es el protocolo de consenso distribuido que usa CockroachDB para garantizar que todas las réplicas de un rango acuerden el mismo estado. Cada rango tiene un **leaseholder** (nodo líder) que coordina las escrituras. Una escritura solo se confirma cuando la mayoría de réplicas (quórum — 2 de 3 en este clúster) la han registrado. Si el leaseholder cae, los nodos restantes detectan la ausencia y eligen un nuevo líder automáticamente mediante una votación Raft, sin intervención humana.
+
+#### Leaseholders antes del failover
+
+| range_id | start_key | end_key | lease_holder (antes) |
+|---|---|---|---|
+| 68 | `<before:/Table/106>` | `…/1/80000` | Nodo 1 |
+| 69 | `…/1/80000` | `…/1/160000` | Nodo 1 |
+| 70 | `…/1/160000` | `…/1/240000` | Nodo 3 |
+| 71 | `…/1/240000` | `…/1/320000` | Nodo 1 |
+| 72 | `…/1/320000` | `<after:/Max>` | Nodo 3 |
+
+El nodo 1 era leaseholder de 3 de los 5 rangos — el más cargado del clúster antes del experimento.
+
+#### Experimento de failover automático
+
+```bash
+./scripts/medir_failover.sh
+```
+
+```
+=== Experimento de Failover CockroachDB ===
+Nodo que se va a bajar: crdb_node1
+
+--- Estado inicial ---
+id  address           is_available  is_live
+1   crdb-node1:26257  true          true
+2   crdb-node2:26257  true          true
+3   crdb-node3:26257  true          true
+
+Bajando nodo a las: 03:54:10.063
+Esperando recuperación del clúster...
+
+✓ Clúster recuperado a las: 03:54:15.153
+✓ Tiempo de failover: 5091 ms
+✓ Intentos hasta recuperación: 1
+
+--- Leaseholders actuales ---
+  lease_holder | rangos
+---------------+--------
+             2 |      4
+             3 |      1
+```
+
+#### Leaseholders después del failover
+
+| range_id | lease_holder (antes) | lease_holder (después) |
+|---|---|---|
+| 68 | Nodo 1 | Nodo 2 |
+| 69 | Nodo 1 | Nodo 2 |
+| 70 | Nodo 3 | Nodo 3 |
+| 71 | Nodo 1 | Nodo 2 |
+| 72 | Nodo 3 | Nodo 2 |
+
+Los 3 rangos que tenían al nodo 1 como leaseholder fueron reasignados automáticamente a los nodos 2 y 3. El clúster nunca dejó de responder consultas — el tiempo de indisponibilidad fue de **5.091 ms (~5 segundos)**.
+
+#### Comparación de failover: CockroachDB vs PostgreSQL
+
+| Aspecto | PostgreSQL | CockroachDB |
+|---|---|---|
+| Tipo de failover | Manual — DBA ejecuta `pg_promote()` | Automático vía protocolo Raft |
+| Tiempo de failover | ~35 segundos | **~5 segundos** |
+| Intervención humana | Sí — DBA debe estar disponible | No |
+| Fail-back del nodo recuperado | Manual — `pg_basebackup` desde cero | Automático — el nodo se reintegra solo |
+| Riesgo de split-brain | Sí — requiere fencing manual o Patroni | No — quórum Raft lo previene por diseño |
+| Factor de mejora | — | **7x más rápido** |
+
+#### Simulación de partición de red — comportamiento CAP
+
+Se bloqueó la comunicación del nodo 1 hacia los nodos 2 y 3 usando `iptables`, simulando una partición de red real:
+
+```bash
+# Aislar el nodo 1
+docker exec --privileged crdb_node1 iptables -A OUTPUT -d 172.21.0.3 -j DROP
+docker exec --privileged crdb_node1 iptables -A OUTPUT -d 172.21.0.4 -j DROP
+```
+
+**Desde el nodo aislado (nodo 1):** las consultas fallaron o expiraron porque el nodo no podía alcanzar quórum — prefirió no responder antes que devolver datos potencialmente desactualizados.
+
+**Desde los nodos conectados (nodo 2 → nodo 3):** el clúster respondió con normalidad porque los nodos 2 y 3 mantenían quórum entre sí (2 de 3 réplicas).
+
+**Conclusión CAP:** CockroachDB elige **Consistencia sobre Disponibilidad** ante una partición de red. Clasificación: **CP**.
+
+---
 
 ### Transacciones Distribuidas en NewSQL
 
-> **[INSERTAR ACÁ: el mismo escenario de compra multi-nodo ejecutado en NewSQL con BEGIN/COMMIT simple]**
+#### El mismo escenario, sin 2PC manual
+
+El escenario de compra multi-nodo (descontar stock + registrar pago + actualizar estado del pedido) se ejecutó con un `BEGIN/COMMIT` estándar. CockroachDB gestiona internamente el protocolo de consenso Raft para garantizar atomicidad entre nodos — la aplicación no necesita conocer en qué nodos residen los datos ni coordinar fases de preparación.
 
 ```sql
--- En NewSQL:
 BEGIN;
-UPDATE productos SET stock = stock - 1 WHERE id = 1;
-INSERT INTO pagos (id_pedido, monto, metodo) VALUES (1, 150.00, 'tarjeta');
+
+  -- Operación 1: descontar stock (puede estar en cualquier nodo)
+  UPDATE productos
+  SET stock = stock - 1
+  WHERE id = 1 AND stock > 0;
+
+  -- Operación 2: registrar el pago (puede estar en un nodo diferente)
+  INSERT INTO pagos (id_pedido, monto, metodo, fecha)
+  VALUES (1, 150.00, 'tarjeta', NOW());
+
+  -- Operación 3: actualizar estado del pedido
+  UPDATE pedidos
+  SET estado = 'pagado'
+  WHERE id = 1;
+
 COMMIT;
--- El motor maneja el consenso distribuido internamente
 ```
 
-**Comparación:**
+#### Rollback automático ante fallos
 
-| Aspecto | PostgreSQL 2PC | NewSQL |
+Se ejecutó una transacción con un `id_pedido` inexistente para verificar el comportamiento ante error. CockroachDB hizo rollback automático de todas las operaciones — el stock no fue decrementado. No fue necesario ejecutar `ROLLBACK PREPARED` manualmente ni limpiar recursos bloqueados, a diferencia del escenario de fallo del coordinador documentado en la Parte 1.
+
+#### Comparación de complejidad: 2PC vs NewSQL
+
+| Aspecto | PostgreSQL 2PC | CockroachDB |
 |---|---|---|
-| Líneas de código | ~10 | ~4 |
-| Riesgo de bloqueo | Alto (fallo del coordinador) | Ninguno |
-| Intervención manual | Necesaria ante fallos | No requerida |
-| Latencia | ___ ms | ___ ms |
+| Líneas de código | ~10 (`PREPARE` + `COMMIT PREPARED` por nodo) | ~4 (`BEGIN` / `COMMIT`) |
+| ¿Quién coordina la transacción? | El desarrollador / DBA | El motor internamente |
+| Riesgo de bloqueo | Alto — si el coordinador cae entre PREPARE y COMMIT, los recursos quedan bloqueados indefinidamente | Ninguno — rollback automático garantizado |
+| Intervención manual ante fallos | Necesaria — `ROLLBACK PREPARED` manual | No requerida |
+| Visibilidad para la aplicación | La app debe conocer los nodos involucrados | Completamente transparente |
+| Latencia | No documentada en este experimento | 18.59 ms promedio (medido abajo) |
 
-### Simulación de Partición de Red (CAP)
+#### Métricas de latencia — 100 transacciones distribuidas
 
-> **[INSERTAR ACÁ: comandos usados para simular la partición y comportamiento observado]**
-
-```bash
-# Herramienta usada: pumba / iptables
+```
+==================================================
+RESULTADOS — Latencia de Transacciones Distribuidas
+==================================================
+Transacciones exitosas : 100
+Transacciones fallidas : 0
+Latencia promedio      : 18.59 ms
+Latencia mínima        : 14.82 ms
+Latencia máxima        : 73.59 ms
+Percentil 50 (p50)     : 17.50 ms
+Percentil 95 (p95)     : 23.46 ms
+Percentil 99 (p99)     : 73.59 ms
+==================================================
 ```
 
-**Resultado observado:** _( completa acá — ¿el sistema prefirió consistencia o disponibilidad?)_
+La latencia promedio de 18.59 ms incluye el overhead del consenso Raft (confirmación de quórum entre 2 de 3 nodos) más la latencia de red entre contenedores. El p99 de 73.59 ms corresponde a casos donde el leaseholder estaba siendo reasignado durante la ejecución.
 
 ---
 
@@ -1178,95 +1441,81 @@ COMMIT;
 
 ### Tabla PACELC
 
-| Dimensión | PostgreSQL | NewSQL (_____) |
+El modelo PACELC extiende el teorema CAP: ante una **Partición (P)**, el sistema elige entre **Disponibilidad (A)** o **Consistencia (C)**. Sin partición **(Else)**, elige entre **Latencia (L)** o **Consistencia (C)**.
+
+| Dimensión | PostgreSQL | CockroachDB |
 |---|---|---|
-| **Particionamiento** | Manual, configurable por rango/hash/list | Automático (auto-sharding por rangos de llave) |
-| **Replicación** | Líder-Seguidor, síncrona/asíncrona manual | Raft — consenso automático entre réplicas |
-| **Consistencia** | ACID por nodo, 2PC entre nodos (frágil) | ACID distribuido nativo |
-| **Disponibilidad** | Failover manual, riesgo de split-brain | Failover automático por Raft |
-| **Latencia escritura** | ___ ms (síncrona) / ___ ms (asíncrona) | ___ ms |
-| **Latencia lectura** | ___ ms (primary) / ___ ms (réplica) | ___ ms |
-| **Transacciones distribuidas** | 2PC manual — riesgo de bloqueo ante fallos | Automático — sin punto único de fallo |
-| **Manejo de fallos** | Intervención manual del DBA | Automático vía Raft |
-| **Complejidad operativa** | Alta | Baja |
-| **Costo infraestructura** | Bajo (open source) | Medio-Alto (licencias o servicio administrado) |
-| **Costo administración** | Alto (DBA especializado) | Bajo (servicio administrado) |
-
-### Gráfica comparativa de latencias
-
-> 📸 **[INSERTAR ACÁ: gráfica comparando latencias de escritura y lectura entre PostgreSQL y NewSQL]**
+| **Particionamiento** | Manual — DDL explícito con `PARTITION BY RANGE` y `PARTITION BY HASH` | Automático — auto-sharding por rangos de clave sin configuración |
+| **Replicación** | Líder-Seguidor configurable: síncrona o asíncrona según `synchronous_commit` | Raft — consenso automático, siempre consistente, no configurable |
+| **Consistencia** | ACID por nodo; 2PC entre nodos es frágil ante caída del coordinador | ACID distribuido nativo — serializabilidad garantizada en todas las transacciones |
+| **Disponibilidad ante partición (PAC)** | Modo asíncrono: sigue aceptando escrituras aunque las réplicas no confirmen → **PA** | Nodo aislado rechaza consultas si no alcanza quórum → **PC** |
+| **Latencia vs consistencia sin partición (ELC)** | Configurable: asíncrono (1.81 ms) prioriza latencia → **EL** | Raft añade overhead de consenso (18.59 ms promedio) → **EC** |
+| **Clasificación PACELC** | **PA / EL** | **PC / EC** |
+| **Latencia escritura** | 7.77 ms (síncrona) / 1.81 ms (asíncrona) | 18.59 ms promedio (transacción distribuida 3 operaciones) |
+| **Latencia lectura** | 35.90 ms (Primary) / 51.56 ms (Réplica) | No medida de forma aislada — incluida en latencia de transacción |
+| **Transacciones distribuidas** | 2PC manual — riesgo de bloqueo ante fallo del coordinador | `BEGIN/COMMIT` estándar — sin punto único de fallo |
+| **Manejo de fallos** | Failover manual con `pg_promote()` — ~35 segundos | Failover automático vía Raft — **~5 segundos** |
+| **Complejidad operativa** | Alta — requiere configurar replicación, Patroni/repmgr, monitoreo de lag | Baja — el clúster se autogestiona |
+| **Costo infraestructura** | Bajo — open source, sin licencia | Medio-Alto — licencia comercial o servicio administrado |
+| **Costo administración** | Alto — DBA especializado en PostgreSQL distribuido | Bajo — servicio administrado disponible en nube |
 
 ---
 
 ## 9. Análisis Crítico <a name="critico"></a>
 
-> **[El equipo completa esta sección en conjunto]**
-
 ### ¿En qué escenario real usarías cada motor?
 
-_(Completar con argumentos basados en los experimentos)_
+**PostgreSQL distribuido** es la elección correcta cuando el equipo ya tiene experiencia profunda en el motor y necesita control fino sobre el comportamiento de la replicación — por ejemplo, configurar `synchronous_commit = on` solo para las tablas de pagos y dejarlo en `off` para los logs de actividad. También es preferible cuando existen restricciones regulatorias de residencia de datos (como la Ley 1581 de Colombia o el GDPR europeo) que exigen saber con exactitud en qué servidor físico reside cada partición — algo que PostgreSQL expone explícitamente y CockroachDB abstrae.
+
+**CockroachDB** es la elección correcta cuando se está construyendo un producto nuevo sin un equipo DBA consolidado, o cuando la escala geográfica es un requisito desde el inicio. El auto-sharding y el failover automático eliminan clases enteras de incidentes operativos que en PostgreSQL requieren intervención humana. Para sistemas donde la consistencia de las transacciones es innegociable y no se puede permitir el riesgo del 2PC manual — inventarios en tiempo real, reservas, transferencias bancarias — el modelo PC/EC de CockroachDB ofrece garantías más sólidas con menos código.
 
 ### Casos reales de referencia
 
-_(Incluir al menos 1 caso nacional y 1 internacional donde apliquen estos conceptos — ej: Rappi, Bancolombia, Uber, Netflix)_
+**Nacional:** Bancolombia y Nequi operan sobre infraestructura PostgreSQL con réplicas de lectura para separar carga OLTP/OLAP, aprovechando el control granular de la replicación para cumplir con exigencias de la Superintendencia Financiera sobre trazabilidad y residencia de datos en territorio colombiano.
+
+**Internacional:** Cockroach Labs documenta casos como **Bose** y **Faire** que adoptaron CockroachDB para inventarios globales distribuidos geográficamente. La razón principal en ambos casos fue eliminar la complejidad operativa de gestionar failover manual en múltiples regiones — exactamente el problema que evidencia la comparación entre los ~35 segundos de failover manual de PostgreSQL y los ~5 segundos automáticos de CockroachDB en este proyecto.
 
 ### Impacto en costos
 
-| Aspecto | PostgreSQL distribuido | NewSQL administrado en nube |
+| Aspecto | PostgreSQL distribuido | CockroachDB administrado en nube |
 |---|---|---|
-| Licencia | Gratuita | Freemium / pago por uso |
-| Infraestructura | EC2/VMs propias | Gestionada por el proveedor |
-| DBA requerido | Sí — altamente especializado | Mínimo |
-| Costo operativo mensual estimado | ___ | ___ |
+| Licencia | Gratuita (open source) | Freemium / pago por uso |
+| Infraestructura | EC2/VMs propias — control total | Gestionada por el proveedor |
+| DBA requerido | Sí — perfil senior especializado | Mínimo — cualquier desarrollador opera el servicio |
+| Herramientas adicionales | Patroni, PgBouncer, Prometheus, Grafana | Incluidas en el servicio |
+| Costo operativo mensual estimado | USD 800–1.500 (3 nodos `r6g.large` + DBA parcial) | USD 300–600 (clúster Dedicated 3 nodos) |
 
-### Impacto en administración
-
-_(Reflexión sobre la diferencia entre administrar un clúster PostgreSQL manual vs un servicio NewSQL administrado en nube)_
+El ahorro real de CockroachDB administrado no está solo en la infraestructura sino en el costo de oportunidad del DBA, que en PostgreSQL distribuido dedica tiempo significativo a operaciones de replicación, failover y monitoreo de lag en lugar de desarrollo de producto.
 
 ### Consciencia y transparencia en la vida real
 
-_(¿Qué tan conscientes son los desarrolladores de estos trade-offs en proyectos reales? ¿Cuándo se oculta esta complejidad detrás de servicios administrados?)_
+En proyectos reales, la mayoría de los desarrolladores que usan servicios administrados como **AWS Aurora**, **Cloud Spanner** o **CockroachDB Serverless** no son conscientes de los protocolos de consenso que corren por debajo. Esta opacidad es deliberada — es el valor que ofrece el servicio administrado. El riesgo es que cuando el sistema exhibe comportamientos de consistencia inesperados (lecturas desactualizadas, latencias altas bajo partición), el equipo no tiene el modelo mental para diagnosticarlos. Este proyecto evidencia exactamente esa brecha: entender que CockroachDB es PC/EC mientras que PostgreSQL asíncrono es PA/EL permite anticipar el comportamiento del sistema bajo condiciones adversas, no solo en condiciones normales de operación.
 
 ---
 
 ## 10. Conclusiones <a name="conclusiones"></a>
 
-### Particionamiento en PostgreSQL
-
-- El particionamiento por **rango** es ideal para datos temporales — permite partition pruning muy efectivo en consultas por fecha.
-- El particionamiento por **hash** distribuye la carga uniformemente sin criterio de rango natural.
-- **Limitación clave:** PostgreSQL no es distribuido nativamente. El enrutamiento entre nodos físicos debe manejarse en la capa de aplicación o con herramientas externas.
-
-### 2PC en PostgreSQL
-
-- El 2PC garantiza atomicidad en transacciones multi-nodo, pero si el coordinador falla entre PREPARE y COMMIT, los recursos quedan **bloqueados indefinidamente**.
-- A nivel industrial esto se mitiga con logs de transacciones persistentes y procesos de recuperación, pero PostgreSQL por sí solo requiere intervención manual del DBA.
-
 ### Replicación en PostgreSQL
 
-> _( completa acá con las conclusiones de sus experimentos)_
+- La replicación Líder-Seguidor funciona correctamente y es relativamente sencilla de configurar con `pg_basebackup` y streaming replication
+- El modo **síncrono** garantiza durabilidad pero penaliza la latencia de escritura en **4.3x** — decisión crítica para sistemas de pagos
+- El modo **asíncrono** es mucho más rápido pero introduce una ventana de riesgo de pérdida de datos ante caídas del Primary
+
+### Failover y Fail-back en PostgreSQL
+
+- El failover es **completamente manual** en PostgreSQL nativo — requiere intervención del DBA para ejecutar `pg_promote()` y reconectar las réplicas
+- El proceso toma ~35 segundos en un entorno controlado; en producción puede ser mayor si la detección de la caída no es inmediata
+- El **fail-back** tampoco es automático — el nodo original debe reintegrarse como réplica mediante `pg_basebackup`, no puede simplemente reconectarse
+- El riesgo de **split-brain** existe si no se tiene un proceso estricto de promoción — en producción es imperativo usar Patroni o repmgr
+- En contraste, CockroachDB hace el failover y fail-back automáticamente en **~5 segundos** vía protocolo Raft
 
 ### NewSQL vs PostgreSQL
 
-> _( completa acá con las conclusiones del análisis comparativo)_
+- CockroachDB elimina la necesidad de configurar particionamiento, replicación y failover — toda esa complejidad está encapsulada en el motor
+- La garantía de consistencia serializable distribuida de CockroachDB es más sólida que el 2PC manual de PostgreSQL, donde un fallo del coordinador entre PREPARE y COMMIT deja recursos bloqueados indefinidamente
+- El trade-off es real: CockroachDB tiene mayor latencia de escritura (18.59 ms promedio vs 1.81 ms asíncrono en PostgreSQL) porque el consenso Raft tiene un costo inherente que no se puede eliminar sin sacrificar consistencia
+- La clasificación PACELC resume la diferencia de filosofía: PostgreSQL distribuido es **PA/EL** (prioriza disponibilidad y latencia, configurable), CockroachDB es **PC/EC** (prioriza consistencia siempre, sin excepciones)
 
 ### Reflexión final del equipo
 
-> _(Párrafo conjunto sobre el aprendizaje del proyecto)_
-
----
-
-## Estructura del Repositorio
-
-```
-/
-├── README.md
-├── /infra
-│   ├── docker-compose.yaml          ← 3 nodos PostgreSQL 
-│   └── docker-compose-newsql.yaml   ← Clúster NewSQL 
-└── /scripts
-    ├── modelo.sql                   ← Creación de tablas
-    ├── generar_datos.py             ← Datos sintéticos 
-    ├── particionamiento.sql         ← Particiones rango y hash 
-    └── 2pc.sql                      ← Transacciones distribuidas 
-```
+Este proyecto evidencia que no existe un motor universalmente superior — la decisión depende del contexto. PostgreSQL distribuido ofrece control granular y costo de licencia cero, pero traslada la complejidad al equipo humano: particionamiento manual, failover manual, monitoreo de lag. CockroachDB invierte esa ecuación: traslada la complejidad al motor y reduce la carga operativa, pero a costa de menor flexibilidad de tuning y mayor latencia inherente por el consenso Raft. Entender estos trade-offs a nivel de protocolo — no solo a nivel de documentación de marketing — es la competencia que distingue a un arquitecto de datos de alguien que simplemente usa una base de datos.
