@@ -30,8 +30,8 @@ Esto da cuatro clasificaciones posibles:
 
 | Escenario | Comportamiento observado | Clasificación |
 |---|---|---|
-| Partición de red | En la simulación con iptables (sección 3.3), el nodo aislado rechazó consultas por no poder alcanzar quórum. El clúster prefirió no responder antes que responder con datos potencialmente desactualizados. Elige **consistencia**. | **PC** |
-| Sin partición | Raft requiere que la mayoría de réplicas confirmen cada escritura antes de responder al cliente. Esto añade latencia de consenso (promedio 18.59 ms medido en sección 3.4) pero garantiza consistencia serializable. Elige **consistencia**. | **EC** |
+| Partición de red | En la simulación con iptables, el nodo aislado rechazó consultas por no poder alcanzar quórum. El clúster prefirió no responder antes que responder con datos potencialmente desactualizados. Elige **consistencia**. | **PC** |
+| Sin partición | Raft requiere que la mayoría de réplicas confirmen cada escritura antes de responder al cliente. Esto añade latencia de consenso (promedio 18.59 ms) pero garantiza consistencia serializable. Elige **consistencia**. | **EC** |
 | **Clasificación total** | | **PC/EC** |
 
 ---
@@ -40,12 +40,12 @@ Esto da cuatro clasificaciones posibles:
 
 | Dimensión | PostgreSQL distribuido | CockroachDB |
 |---|---|---|
-| **Particionamiento** | Manual. Isabella es¡cribió DDL explícito con `PARTITION BY RANGE` y `PARTITION BY HASH`. Requiere conocer la distribución de datos anticipadamente. | Automático. El motor divide las tablas en rangos de 512 MB y los redistribuye sin intervención. La app no necesita saber dónde están los datos. |
-| **Replicación** | Configurable entre síncrona (`synchronous_commit = on`) y asíncrona (`off`). Juan José midió latencia de escritura síncrona en 7.77 ms y asíncrona en 1.81 ms. | Siempre basada en consenso Raft. Cada escritura requiere quórum (2 de 3 nodos). No hay modo asíncrono — la consistencia no es negociable. |
+| **Particionamiento** | Manual. Se escribió DDL explícito con `PARTITION BY RANGE` y `PARTITION BY HASH`. Requiere conocer la distribución de datos anticipadamente. | Automático. El motor divide las tablas en rangos de 512 MB y los redistribuye sin intervención. La app no necesita saber dónde están los datos. |
+| **Replicación** | Configurable entre síncrona (`synchronous_commit = on`) y asíncrona (`off`). Se midió latencia de escritura síncrona en 7.77 ms y asíncrona en 1.81 ms. | Siempre basada en consenso Raft. Cada escritura requiere quórum (2 de 3 nodos). No hay modo asíncrono — la consistencia no es negociable. |
 | **Consistencia** | Configurable. En modo asíncrono puede haber lag de replicación — réplicas con datos desactualizados. En modo síncrono es fuerte pero con mayor latencia. | Serializabilidad por defecto en todas las transacciones. No hay niveles de aislamiento más débiles disponibles para escrituras distribuidas. |
 | **Latencia de escritura** | Asíncrona: 7.77 ms. Síncrona: 1.81 ms. (Datos de Juan José) | Transacción distribuida (3 operaciones): promedio 18.59 ms, p95 23.46 ms, p99 73.59 ms. |
 | **Transacciones distribuidas** | 2PC manual. Requiere `PREPARE TRANSACTION` en cada nodo y `COMMIT PREPARED` como coordinador. Si el coordinador cae entre fases, los recursos quedan bloqueados hasta intervención manual. | `BEGIN/COMMIT` estándar. El motor gestiona el protocolo de consenso internamente. Rollback automático garantizado ante cualquier fallo. |
-| **Tolerancia a fallos** | Failover manual con `pg_promote()` o herramientas como Patroni. Juan José midió un tiempo de failover de 35 segundos. Requiere un DBA disponible o automatización externa. | Failover automático por Raft: 5091 ms (~5 segundos). Sin intervención humana. |
+| **Tolerancia a fallos** | Failover manual con `pg_promote()` o herramientas como Patroni. Se midió un tiempo de failover de 35 segundos. Requiere un DBA disponible o automatización externa. | Failover automático por Raft: 5091 ms (~5 segundos). Sin intervención humana. |
 | **Complejidad operativa** | Alta. Requiere configurar `pg_hba.conf`, `postgresql.conf`, replicación, Patroni o repmgr, monitoreo de lag, y un DBA especializado en PostgreSQL distribuido. | Baja para operaciones. El clúster se autogestiona: balanceo de rangos, elección de líderes, reintegración de nodos caídos. La complejidad está en entender el modelo de consistencia, no en la operación diaria. |
 
 ---
