@@ -1,3 +1,7 @@
+# ShopFast — Arquitectura de base de datos distribuida
+
+Particionamiento, transacciones distribuidas (2PC), replicación con failover en PostgreSQL y comparación con NewSQL (CockroachDB) para un e-commerce ficticio.
+
 **SI3009 Bases de Datos Avanzadas, 2026-1**  
 **Ingeniería de Sistemas**  
 **Equipo:** Isabella Idarraga · Juan José Rodriguez · Nicolás Saldarriaga
